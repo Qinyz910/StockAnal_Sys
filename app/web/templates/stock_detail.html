@@ -437,7 +437,69 @@
     let stockData = [];
     let analysisResult = null;
     let processingTimer;
-    let processingTime = 0;
+        let processingTime = 0;
+
+    // === THEME-AWARE CHART LOGIC START ===
+    let charts = {}; // Store chart instances
+
+    function getApexChartThemeOptions() {
+        const isDarkMode = $('html').attr('data-theme') === 'dark';
+        const options = {
+            theme: {
+                mode: isDarkMode ? 'dark' : 'light'
+            },
+            chart: {
+                background: 'transparent'
+            },
+            tooltip: {
+                theme: isDarkMode ? 'dark' : 'light'
+            }
+        };
+        
+        if(isDarkMode) {
+            options.plotOptions = {
+                radialBar: {
+                    track: { background: '#3e3e42' }
+                },
+                radar: {
+                    polygons: {
+                        strokeColors: '#555',
+                        fill: { colors: ['#393939', '#444444'] }
+                    }
+                }
+            };
+        } else {
+             options.plotOptions = {
+                radialBar: {
+                    track: { background: '#f2f2f2' }
+                },
+                radar: {
+                     polygons: {
+                        strokeColors: '#e9e9e9',
+                        fill: { colors: ['#f8f8f8', '#fff'] }
+                    }
+                }
+            };
+        }
+        return options;
+    }
+
+    function destroyAllCharts() {
+        Object.values(charts).forEach(chart => {
+            if (chart && typeof chart.destroy === 'function') {
+                chart.destroy();
+            }
+        });
+        charts = {};
+    }
+
+    function rerenderAllCharts() {
+        if (!stockData || stockData.length === 0) return;
+        destroyAllCharts();
+        renderSystemIndicators();
+    }
+    // === THEME-AWARE CHART LOGIC END ===
+
     
     // 页面加载时的闪烁效果
     function addShimmerEffect() {
@@ -493,10 +555,24 @@
             cancelAnalysis();
         });
         
+        
         // 重试按钮
         $('#retry-button').click(function() {
             $('#error-retry').hide();
             startAIAnalysis();
+        });
+
+        // Observe theme changes for charts
+        const observer = new MutationObserver(function(mutations) {
+            mutations.forEach(function(mutation) {
+                if (mutation.attributeName === "data-theme") {
+                    rerenderAllCharts();
+                }
+            });
+        });
+
+        observer.observe(document.documentElement, {
+            attributes: true
         });
     });
 
@@ -926,7 +1002,9 @@
             colors: [getScoreColor(score)]
         };
 
-        const chart = new ApexCharts(document.querySelector("#score-chart"), options);
+        const finalOptions = $.extend(true, {}, options, getApexChartThemeOptions());
+        const chart = new ApexCharts(document.querySelector("#score-chart"), finalOptions);
+        charts.score = chart;
         chart.render();
     }
     
@@ -981,7 +1059,9 @@
             }
         };
 
-        const chart = new ApexCharts(document.querySelector("#radar-chart"), options);
+        const finalOptions = $.extend(true, {}, options, getApexChartThemeOptions());
+        const chart = new ApexCharts(document.querySelector("#radar-chart"), finalOptions);
+        charts.radar = chart;
         chart.render();
     }
     
@@ -1114,7 +1194,9 @@
                 }
             };
 
-            const chart = new ApexCharts(document.querySelector("#price-chart"), options);
+            const finalOptions = $.extend(true, {}, options, getApexChartThemeOptions());
+            const chart = new ApexCharts(document.querySelector("#price-chart"), finalOptions);
+            charts.price = chart;
             chart.render();
         } catch (error) {
             console.error("渲染价格图表时出错:", error);
@@ -1261,7 +1343,9 @@
                 }
             };
 
-            const chart = new ApexCharts(document.querySelector("#indicators-chart"), options);
+            const finalOptions = $.extend(true, {}, options, getApexChartThemeOptions());
+            const chart = new ApexCharts(document.querySelector("#indicators-chart"), finalOptions);
+            charts.indicators = chart;
             chart.render();
         } catch (error) {
             console.error("渲染指标图表时出错:", error);
@@ -1368,7 +1452,9 @@
                 }
             };
 
-            const chart = new ApexCharts(document.querySelector("#volume-chart"), options);
+            const finalOptions = $.extend(true, {}, options, getApexChartThemeOptions());
+            const chart = new ApexCharts(document.querySelector("#volume-chart"), finalOptions);
+            charts.volume = chart;
             chart.render();
         } catch (error) {
             console.error("渲染成交量图表时出错:", error);

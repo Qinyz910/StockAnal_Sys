@@ -9,8 +9,8 @@
 import numpy as np
 import pandas as pd
 from flask import Flask, render_template, request, jsonify, redirect, url_for
-from stock_analyzer import StockAnalyzer
-from us_stock_service import USStockService
+from app.analysis.stock_analyzer import StockAnalyzer
+from app.analysis.us_stock_service import USStockService
 import threading
 import logging
 from logging.handlers import RotatingFileHandler
@@ -19,21 +19,31 @@ import os
 import json
 from datetime import date, datetime, timedelta
 from flask_cors import CORS
+from pathlib import Path
 import time
 from flask_caching import Cache
 import threading
 import sys
 from flask_swagger_ui import get_swaggerui_blueprint
-from database import get_session, StockInfo, AnalysisResult, Portfolio, USE_DATABASE
+from app.core.database import get_session, StockInfo, AnalysisResult, Portfolio, USE_DATABASE
 from dotenv import load_dotenv
-from industry_analyzer import IndustryAnalyzer
-from fundamental_analyzer import FundamentalAnalyzer
-from capital_flow_analyzer import CapitalFlowAnalyzer
-from scenario_predictor import ScenarioPredictor
-from stock_qa import StockQA
-from risk_monitor import RiskMonitor
-from index_industry_analyzer import IndexIndustryAnalyzer
-from news_fetcher import news_fetcher, start_news_scheduler
+from app.analysis.industry_analyzer import IndustryAnalyzer
+from app.analysis.fundamental_analyzer import FundamentalAnalyzer
+from app.analysis.capital_flow_analyzer import CapitalFlowAnalyzer
+from app.analysis.scenario_predictor import ScenarioPredictor
+from app.analysis.stock_qa import StockQA
+from app.analysis.risk_monitor import RiskMonitor
+from app.analysis.index_industry_analyzer import IndexIndustryAnalyzer
+from app.analysis.news_fetcher import news_fetcher, start_news_scheduler
+from app.analysis.etf_analyzer import EtfAnalyzer
+
+import sys
+import os
+
+# 将 tradingagents 目录添加到系统路径
+# 这允许应用从 tradingagents 代码库中导入模块
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../tradingagents')))
+
 
 # 加载环境变量
 load_dotenv()
@@ -77,10 +87,11 @@ cache.init_app(app)
 
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
 
+
 # 确保全局变量在重新加载时不会丢失
 if 'analyzer' not in globals():
     try:
-        from stock_analyzer import StockAnalyzer
+        from app.analysis.stock_analyzer import StockAnalyzer
 
         analyzer = StockAnalyzer()
         print("成功初始化全局StockAnalyzer实例")
@@ -92,7 +103,7 @@ if 'analyzer' not in globals():
 fundamental_analyzer = FundamentalAnalyzer()
 capital_flow_analyzer = CapitalFlowAnalyzer()
 scenario_predictor = ScenarioPredictor(analyzer, os.getenv('OPENAI_API_KEY'), os.getenv('OPENAI_API_MODEL'))
-stock_qa = StockQA(analyzer, os.getenv('OPENAI_API_KEY'), os.getenv('OPENAI_API_MODEL'))
+stock_qa = StockQA(analyzer, os.getenv('OPENAI_API_KEY'))
 risk_monitor = RiskMonitor(analyzer)
 index_industry_analyzer = IndexIndustryAnalyzer(analyzer)
 industry_analyzer = IndustryAnalyzer()
@@ -112,24 +123,63 @@ def get_analyzer():
 
 
 # 配置日志
-logging.basicConfig(level=logging.INFO)
-handler = RotatingFileHandler('flask_app.log', maxBytes=10000000, backupCount=5)
-handler.setFormatter(logging.Formatter(
-    '[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
-))
-app.logger.addHandler(handler)
+# 从环境变量读取日志级别和文件路径
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+log_file = os.getenv('LOG_FILE', 'data/logs/server.log')
+
+# 确保日志目录存在
+os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+# 创建日志格式化器
+formatter = logging.Formatter(
+    '[%(asctime)s] [%(process)d:%(thread)d] [%(levelname)s] [%(name)s:%(lineno)d] - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# 配置根日志记录器
+root_logger = logging.getLogger()
+root_logger.setLevel(log_level)
+
+# 清除所有现有的处理器，以避免重复日志
+if root_logger.hasHandlers():
+    root_logger.handlers.clear()
+
+# 添加文件处理器
+file_handler = RotatingFileHandler(log_file, maxBytes=1024*1024*10, backupCount=5, encoding='utf-8') # 10MB
+file_handler.setFormatter(formatter)
+root_logger.addHandler(file_handler)
+
+# 添加控制台处理器
+console_handler = logging.StreamHandler(sys.stdout)
+console_handler.setFormatter(formatter)
+root_logger.addHandler(console_handler)
+
+# 将Flask的默认处理器移除，使其日志也遵循我们的配置
+from flask.logging import default_handler
+app.logger.removeHandler(default_handler)
+app.logger.propagate = True
+
+# 将 werkzeug 日志记录器的级别也设置为 .env 中定义的级别
+logging.getLogger('werkzeug').setLevel(log_level)
+
+app.logger.info(f"日志系统已初始化，级别: {log_level}, 文件: {log_file}")
+
 
 # 扩展任务管理系统以支持不同类型的任务
 task_types = {
     'scan': 'market_scan',  # 市场扫描任务
-    'analysis': 'stock_analysis'  # 个股分析任务
+    'analysis': 'stock_analysis',  # 个股分析任务
+    'agent_analysis': 'agent_analysis', # 智能体分析任务
+    'etf_analysis': 'etf_analysis' # ETF分析任务
 }
 
 # 任务数据存储
 tasks = {
-    'market_scan': {},  # 原来的scan_tasks
-    'stock_analysis': {}  # 新的个股分析任务
+    'market_scan': {},
+    'stock_analysis': {},
+    'etf_analysis': {},
 }
+
 
 
 def get_task_store(task_type):
@@ -142,6 +192,8 @@ def generate_task_key(task_type, **params):
     if task_type == 'stock_analysis':
         # 对于个股分析，使用股票代码和市场类型作为键
         return f"{params.get('stock_code')}_{params.get('market_type', 'A')}"
+    if task_type == 'etf_analysis':
+        return f"{params.get('etf_code')}"
     return None  # 其他任务类型不使用预生成的键
 
 
@@ -186,11 +238,17 @@ def get_or_create_task(task_type, **params):
 scan_tasks = {}  # 存储扫描任务的状态和结果
 task_lock = threading.Lock()  # 用于线程安全操作
 
+
+# 自定义异常，用于任务取消
+class TaskCancelledException(Exception):
+    pass
+
 # 任务状态常量
 TASK_PENDING = 'pending'
 TASK_RUNNING = 'running'
 TASK_COMPLETED = 'completed'
 TASK_FAILED = 'failed'
+TASK_CANCELLED = 'cancelled'
 
 
 def generate_task_id():
@@ -216,22 +274,40 @@ def start_market_scan_task_status(task_id, status, progress=None, result=None, e
 
 def update_task_status(task_type, task_id, status, progress=None, result=None, error=None):
     """更新任务状态"""
-    store = get_task_store(task_type)
     with task_lock:
-        if task_id in store:
-            task = store[task_id]
-            task['status'] = status
-            if progress is not None:
-                task['progress'] = progress
-            if result is not None:
-                task['result'] = result
-            if error is not None:
-                task['error'] = error
-            task['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        task = None
+        if task_type == 'agent_analysis':
+            task = agent_session_manager.load_task(task_id)
+        else:
+            store = get_task_store(task_type)
+            if task_id in store:
+                task = store.get(task_id)
 
-            # 更新键索引的任务
-            if 'key' in task and task['key'] in store:
+        if not task:
+            app.logger.warning(f"更新任务状态时未找到任务: {task_id} (类型: {task_type})")
+            return
+
+        # 更新任务属性
+        task['status'] = status
+        if progress is not None:
+            task['progress'] = progress
+        if result is not None:
+            if 'result' not in task or not isinstance(task['result'], dict):
+                task['result'] = {}
+            task['result'].update(result)
+        if error is not None:
+            task['error'] = error
+        task['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # 保存更新后的任务
+        if task_type == 'agent_analysis':
+            agent_session_manager.save_task(task)
+        else:
+            # 更新键索引的任务 (如果适用)
+            store = get_task_store(task_type)
+            if 'key' in task and task.get('key') and task['key'] in store:
                 store[task['key']] = task
+            store[task_id] = task # also save by id
 
 
 analysis_tasks = {}
@@ -301,7 +377,7 @@ def convert_numpy_types(obj):
         import math
 
         if isinstance(obj, dict):
-            return {key: convert_numpy_types(value) for key, value in obj.items()}
+            return {convert_numpy_types(key): convert_numpy_types(value) for key, value in obj.items()}
         elif isinstance(obj, list):
             return [convert_numpy_types(item) for item in obj]
         elif isinstance(obj, np.integer):
@@ -333,7 +409,7 @@ def convert_numpy_types(obj):
         # 如果没有安装numpy，但需要处理date和datetime
         import math
         if isinstance(obj, dict):
-            return {key: convert_numpy_types(value) for key, value in obj.items()}
+            return {convert_numpy_types(key): convert_numpy_types(value) for key, value in obj.items()}
         elif isinstance(obj, list):
             return [convert_numpy_types(item) for item in obj]
         elif isinstance(obj, (date, datetime)):
@@ -351,6 +427,14 @@ def convert_numpy_types(obj):
 # 同样更新 NumpyJSONEncoder 类
 class NumpyJSONEncoder(json.JSONEncoder):
     def default(self, obj):
+        # Handle LangChain message objects first
+        try:
+            from langchain_core.messages import BaseMessage
+            if isinstance(obj, BaseMessage):
+                return {"type": obj.__class__.__name__, "content": str(obj.content)}
+        except ImportError:
+            pass  # If langchain is not installed, just proceed
+
         # For NumPy data types
         try:
             import numpy as np
@@ -388,7 +472,36 @@ class NumpyJSONEncoder(json.JSONEncoder):
         if isinstance(obj, (date, datetime)):
             return obj.isoformat()
 
-        return super(NumpyJSONEncoder, self).default(obj)
+        # Fallback for other non-serializable types
+        try:
+            return super(NumpyJSONEncoder, self).default(obj)
+        except TypeError:
+            # For LangChain messages or other complex objects, convert to string
+            return str(obj)
+
+
+# Helper to convert LangChain messages to JSON serializable format
+def convert_messages_to_dict(obj):
+    """Recursively convert LangChain message objects to dictionaries."""
+    # Check if langchain_core is available and if the object is a message
+    try:
+        from langchain_core.messages import BaseMessage
+        is_message = isinstance(obj, BaseMessage)
+    except ImportError:
+        is_message = False
+
+    if is_message:
+        # Base case: convert message object to dict
+        return {"type": obj.__class__.__name__, "content": str(obj.content)}
+    elif isinstance(obj, dict):
+        # Recursive step for dictionaries
+        return {k: convert_messages_to_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        # Recursive step for lists
+        return [convert_messages_to_dict(elem) for elem in obj]
+    else:
+        # Return the object as is if no conversion is needed
+        return obj
 
 
 # 使用我们的编码器的自定义 jsonify 函数
@@ -470,7 +583,6 @@ def api_north_flow_history():
             return jsonify({'error': '请提供股票代码'}), 400
 
         # 调用北向资金历史数据方法
-        from capital_flow_analyzer import CapitalFlowAnalyzer
 
         analyzer = CapitalFlowAnalyzer()
         result = analyzer.get_north_flow_history(stock_code, start_date, end_date)
@@ -552,6 +664,21 @@ def qa_page():
 @app.route('/industry_analysis')
 def industry_analysis():
     return render_template('industry_analysis.html')
+
+
+
+# 智能体分析页面
+@app.route('/agent_analysis')
+def agent_analysis_page():
+    return render_template('agent_analysis.html')
+
+
+@app.route('/etf_analysis')
+def etf_analysis_page():
+    return render_template('etf_analysis.html')
+
+
+
 
 
 def make_cache_key_with_stock():
@@ -692,6 +819,93 @@ def cancel_analysis(task_id):
         return jsonify({'message': '任务已取消'})
 
 
+# ETF 分析路由
+@app.route('/api/start_etf_analysis', methods=['POST'])
+def start_etf_analysis():
+    """启动ETF分析任务"""
+    try:
+        data = request.json
+        etf_code = data.get('etf_code')
+
+        if not etf_code:
+            return jsonify({'error': '请输入ETF代码'}), 400
+
+        app.logger.info(f"准备分析ETF: {etf_code}")
+
+        task_id, task, is_new = get_or_create_task(
+            'etf_analysis',
+            etf_code=etf_code
+        )
+
+        if task['status'] == TASK_COMPLETED and 'result' in task:
+            app.logger.info(f"使用缓存的ETF分析结果: {etf_code}")
+            return jsonify({
+                'task_id': task_id,
+                'status': task['status'],
+                'result': task['result']
+            })
+
+        if is_new:
+            app.logger.info(f"创建新的ETF分析任务: {task_id}")
+
+            def run_etf_analysis():
+                try:
+                    update_task_status('etf_analysis', task_id, TASK_RUNNING, progress=10)
+                    
+                    # 使用一个新的 EtfAnalyzer 实例, 并传入stock_analyzer
+                    etf_analyzer_instance = EtfAnalyzer(etf_code, analyzer)
+                    result = etf_analyzer_instance.run_analysis()
+                    
+                    update_task_status('etf_analysis', task_id, TASK_COMPLETED, progress=100, result=result)
+                    app.logger.info(f"ETF分析任务 {task_id} 完成")
+
+                except Exception as e:
+                    app.logger.error(f"ETF分析任务 {task_id} 失败: {str(e)}")
+                    app.logger.error(traceback.format_exc())
+                    update_task_status('etf_analysis', task_id, TASK_FAILED, error=str(e))
+
+            thread = threading.Thread(target=run_etf_analysis)
+            thread.daemon = True
+            thread.start()
+
+        return jsonify({
+            'task_id': task_id,
+            'status': task['status'],
+            'message': f'已启动ETF分析任务: {etf_code}'
+        })
+
+    except Exception as e:
+        app.logger.error(f"启动ETF分析任务时出错: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/etf_analysis_status/<task_id>', methods=['GET'])
+def get_etf_analysis_status(task_id):
+    """获取ETF分析任务状态"""
+    store = get_task_store('etf_analysis')
+    with task_lock:
+        if task_id not in store:
+            return jsonify({'error': '找不到指定的ETF分析任务'}), 404
+
+        task = store[task_id]
+
+        status = {
+            'id': task['id'],
+            'status': task['status'],
+            'progress': task.get('progress', 0),
+            'created_at': task['created_at'],
+            'updated_at': task['updated_at']
+        }
+
+        if task['status'] == TASK_COMPLETED and 'result' in task:
+            status['result'] = task['result']
+        
+        if task['status'] == TASK_FAILED and 'error' in task:
+            status['error'] = task['error']
+
+        return custom_jsonify(status)
+
+
 # 保留原有API用于向后兼容
 @app.route('/api/enhanced_analysis', methods=['POST'])
 def enhanced_analysis():
@@ -818,14 +1032,14 @@ def get_stock_data():
             f"获取股票 {stock_code} 的历史数据，市场: {market_type}, 起始日期: {start_date}, 结束日期: {end_date}")
         df = analyzer.get_stock_data(stock_code, market_type, start_date, end_date)
 
-        # 计算技术指标
-        app.logger.info(f"计算股票 {stock_code} 的技术指标")
-        df = analyzer.calculate_indicators(df)
-
         # 检查数据是否为空
         if df.empty:
             app.logger.warning(f"股票 {stock_code} 的数据为空")
             return custom_jsonify({'error': '未找到股票数据'}), 404
+
+        # 计算技术指标
+        app.logger.info(f"计算股票 {stock_code} 的技术指标")
+        df = analyzer.calculate_indicators(df)
 
         # 将DataFrame转为JSON格式
         app.logger.info(f"将数据转换为JSON格式，行数: {len(df)}")
@@ -1662,11 +1876,326 @@ def get_latest_news():
         app.logger.error(f"获取最新新闻数据时出错: {str(e)}")
         return jsonify({'success': False, 'error': str(e)}), 500
 
+
+
+# --- Start of new FileSessionManager implementation ---
+class FileSessionManager:
+    """A Flask-compatible file-based session manager for agent tasks."""
+    def __init__(self, data_dir):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+    def _get_task_path(self, task_id):
+        return self.data_dir / f"{task_id}.json"
+
+    def save_task(self, task_data):
+        if 'id' not in task_data:
+            app.logger.error("Attempted to save task without an 'id'")
+            return
+        task_id = task_data['id']
+        task_file = self._get_task_path(task_id)
+        with open(task_file, 'w', encoding='utf-8') as f:
+            json.dump(task_data, f, ensure_ascii=False, indent=4, cls=NumpyJSONEncoder)
+
+    def load_task(self, task_id):
+        task_file = self._get_task_path(task_id)
+        if not task_file.exists():
+            return None
+        with open(task_file, 'r', encoding='utf-8') as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                app.logger.error(f"Failed to decode JSON for task {task_id}")
+                return None
+
+    def get_all_tasks(self):
+        tasks = []
+        for task_file in self.data_dir.glob("*.json"):
+            with open(task_file, 'r', encoding='utf-8') as f:
+                try:
+                    tasks.append(json.load(f))
+                except json.JSONDecodeError:
+                    app.logger.warning(f"Skipping corrupted task file: {task_file.name}")
+                    continue
+        return tasks
+
+    def cleanup_stale_tasks(self, timeout_hours=2):
+        """Clean up stale 'running' tasks that have exceeded a timeout."""
+        app.logger.info("开始清理过时的任务...")
+        cleaned_count = 0
+        now = datetime.now()
+        
+        tasks = self.get_all_tasks()
+        for task in tasks:
+            if task.get('status') == TASK_RUNNING:
+                try:
+                    updated_at = datetime.strptime(task.get('updated_at'), '%Y-%m-%d %H:%M:%S')
+                    if (now - updated_at).total_seconds() > timeout_hours * 3600:
+                        task['status'] = TASK_FAILED
+                        task['error'] = '任务因服务器重启或超时而中止'
+                        task['updated_at'] = now.strftime('%Y-%m-%d %H:%M:%S')
+                        self.save_task(task)
+                        cleaned_count += 1
+                        app.logger.warning(f"清理了过时的任务 {task.get('id')}，该任务已运行超过 {timeout_hours} 小时。")
+                except (ValueError, TypeError) as e:
+                    app.logger.error(f"解析任务 {task.get('id')} 的 updated_at 时出错: {e}")
+                    continue
+        
+        if cleaned_count > 0:
+            app.logger.info(f"清理完成，共处理了 {cleaned_count} 个过时的任务。")
+        else:
+            app.logger.info("没有发现需要清理的过时任务。")
+
+    def delete_task(self, task_id):
+        """Safely delete a task file."""
+        try:
+            task_file = self._get_task_path(task_id)
+            if task_file.exists():
+                task_file.unlink()
+                return True
+        except Exception as e:
+            app.logger.error(f"Failed to delete task {task_id}: {e}")
+        return False
+
+# Instantiate the manager
+AGENT_SESSIONS_DIR = os.path.join(os.path.dirname(__file__), '../../data/agent_sessions')
+agent_session_manager = FileSessionManager(AGENT_SESSIONS_DIR)
+agent_session_manager.cleanup_stale_tasks()
+# --- End of new FileSessionManager implementation ---
+
+
+# 智能体分析路由
+@app.route('/api/start_agent_analysis', methods=['POST'])
+def start_agent_analysis():
+    """启动智能体分析任务"""
+    try:
+        data = request.json
+        stock_code = data.get('stock_code')
+        research_depth = data.get('research_depth', 3)
+        market_type = data.get('market_type', 'A')
+        selected_analysts = data.get('selected_analysts', ["market", "social", "news", "fundamentals"])
+        analysis_date = data.get('analysis_date')
+        enable_memory = data.get('enable_memory', True)
+        max_output_length = data.get('max_output_length', 2048)
+
+        if not stock_code:
+            return jsonify({'error': '请提供股票代码'}), 400
+
+        # 创建新任务
+        task_id = generate_task_id()
+        task = {
+            'id': task_id,
+            'status': TASK_PENDING,
+            'progress': 0,
+            'current_step': '任务已创建',
+            'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'params': {
+                'stock_code': stock_code,
+                'research_depth': research_depth,
+                'market_type': market_type,
+                'selected_analysts': selected_analysts,
+                'analysis_date': analysis_date,
+                'enable_memory': enable_memory,
+                'max_output_length': max_output_length
+            }
+        }
+        
+        # 为任务创建取消事件
+        task['cancel_event'] = threading.Event()
+        agent_session_manager.save_task(task)
+        
+        def run_agent_analysis():
+            """在后台线程中运行智能体分析"""
+            try:
+                from tradingagents.graph.trading_graph import TradingAgentsGraph
+                from tradingagents.default_config import DEFAULT_CONFIG
+                
+                update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=5, result={'current_step': '正在初始化智能体...'})
+
+                # --- 修复 Start: 强制使用主应用的OpenAI代理配置 ---
+                config = DEFAULT_CONFIG.copy()
+                config['llm_provider'] = 'openai'
+                config['backend_url'] = os.getenv('OPENAI_API_URL')
+                main_model = os.getenv('OPENAI_API_MODEL', 'gpt-4o')
+                config['deep_think_llm'] = main_model
+                config['quick_think_llm'] = main_model
+                config['memory_enabled'] = enable_memory
+                config['max_tokens'] = max_output_length
+                
+                if not os.getenv('OPENAI_API_KEY'):
+                    raise ValueError("主应用的 OPENAI_API_KEY 未在.env文件中设置")
+
+                app.logger.info(f"强制使用主应用代理配置进行智能体分析: provider={config['llm_provider']}, url={config['backend_url']}, model={config['deep_think_llm']}")
+
+                ta = TradingAgentsGraph(
+                    selected_analysts=selected_analysts,
+                    debug=True, 
+                    config=config
+                )
+                # --- 修复 End ---
+                
+                def progress_callback(progress, step):
+                    current_task = agent_session_manager.load_task(task_id)
+                    if not current_task or current_task.get('status') == TASK_CANCELLED:
+                         raise TaskCancelledException(f"任务 {task_id} 已被用户取消")
+                    update_task_status('agent_analysis', task_id, TASK_RUNNING, progress=progress, result={'current_step': step})
+
+                today = analysis_date or datetime.now().strftime('%Y-%m-%d')
+                state, decision = ta.propagate(stock_code, today, market_type=market_type, progress_callback=progress_callback)
+                
+                # 修复：在任务完成时，获取并添加公司名称到最终结果中
+                try:
+                    stock_info = analyzer.get_stock_info(stock_code)
+                    stock_name = stock_info.get('股票名称', '未知')
+                    # 将公司名称添加到 state 字典中，前端将从这里读取
+                    if isinstance(state, dict):
+                        state['company_name'] = stock_name
+                except Exception as e:
+                    app.logger.error(f"为 {stock_code} 获取公司名称时出错: {e}")
+                    if isinstance(state, dict):
+                        state['company_name'] = '名称获取失败'
+                
+                update_task_status('agent_analysis', task_id, TASK_COMPLETED, progress=100, result={'decision': decision, 'final_state': state, 'current_step': '分析完成'})
+                app.logger.info(f"智能体分析任务 {task_id} 完成")
+
+            except TaskCancelledException as e:
+                app.logger.info(str(e))
+                update_task_status('agent_analysis', task_id, TASK_FAILED, error='任务已被用户取消', result={'current_step': '任务已被用户取消'})
+            except Exception as e:
+                app.logger.error(f"智能体分析任务 {task_id} 失败: {str(e)}")
+                app.logger.error(traceback.format_exc())
+                update_task_status('agent_analysis', task_id, TASK_FAILED, error=str(e), result={'current_step': f'分析失败: {e}'})
+
+        thread = threading.Thread(target=run_agent_analysis)
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({
+            'task_id': task_id,
+            'status': 'pending',
+            'message': f'已启动对 {stock_code} 的智能体分析'
+        })
+
+    except Exception as e:
+        app.logger.error(f"启动智能体分析时出错: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/agent_analysis_status/<task_id>', methods=['GET'])
+def get_agent_analysis_status(task_id):
+    """获取智能体分析任务的状态"""
+    task = agent_session_manager.load_task(task_id)
+
+    if not task:
+        return jsonify({'error': '找不到指定的智能体分析任务'}), 404
+    
+    # 准备要返回的数据
+    response_data = {
+        'id': task['id'],
+        'status': task['status'],
+        'progress': task.get('progress', 0),
+        'created_at': task['created_at'],
+        'updated_at': task['updated_at'],
+        'params': task.get('params', {})
+    }
+    
+    if 'result' in task:
+         response_data['result'] = convert_messages_to_dict(task['result'])
+    if 'error' in task:
+         response_data['error'] = task['error']
+         
+    return custom_jsonify(response_data)
+
+
+@app.route('/api/agent_analysis_history', methods=['GET'])
+def get_agent_analysis_history():
+    """获取已完成的智能体分析任务历史"""
+    try:
+        all_tasks = agent_session_manager.get_all_tasks()
+        history = [
+            task for task in all_tasks 
+            if task.get('status') in [TASK_COMPLETED, TASK_FAILED]
+        ]
+        # 按更新时间排序，最新的在前
+        history.sort(key=lambda x: x.get('updated_at', ''), reverse=True)
+        return custom_jsonify({'history': history})
+    except Exception as e:
+        app.logger.error(f"获取分析历史时出错: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/delete_agent_analysis', methods=['POST'])
+def delete_agent_analysis():
+    """Cancel and/or delete one or more agent analysis tasks."""
+    try:
+        data = request.json
+        task_ids = data.get('task_ids', [])
+        if not isinstance(task_ids, list):
+            return jsonify({'error': 'task_ids 必须是一个列表'}), 400
+
+        if not task_ids:
+            return jsonify({'error': '请提供要删除的任务ID'}), 400
+
+        deleted_count = 0
+        cancelled_count = 0
+        
+        for task_id in task_ids:
+            task = agent_session_manager.load_task(task_id)
+            if not task:
+                app.logger.warning(f"尝试删除一个不存在的任务: {task_id}")
+                continue
+
+            # If the task is running, mark it as cancelled
+            if task.get('status') == TASK_RUNNING:
+                task['status'] = TASK_CANCELLED
+                task['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                task['error'] = '任务已被用户取消'
+                agent_session_manager.save_task(task)
+                cancelled_count += 1
+                app.logger.info(f"任务 {task_id} 已被标记为取消。")
+            
+            # For all other states (or after cancelling), delete the task file
+            if agent_session_manager.delete_task(task_id):
+                deleted_count += 1
+        
+        message = f"请求处理 {len(task_ids)} 个任务。已取消 {cancelled_count} 个运行中的任务，并删除了 {deleted_count} 个任务文件。"
+        app.logger.info(message)
+        return jsonify({'success': True, 'message': message})
+
+    except Exception as e:
+        app.logger.error(f"删除分析历史时出错: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+
+
+@app.route('/api/active_tasks', methods=['GET'])
+def get_active_tasks():
+    """获取所有正在进行的智能体分析任务"""
+    try:
+        all_tasks = agent_session_manager.get_all_tasks()
+        active_tasks_list = []
+        for task in all_tasks:
+            if task.get('status') == TASK_RUNNING:
+                task_info = {
+                    'task_id': task['id'],
+                    'stock_code': task.get('params', {}).get('stock_code'),
+                    'progress': task.get('progress', 0),
+                    'current_step': task.get('result', {}).get('current_step', '加载中...')
+                }
+                active_tasks_list.append(task_info)
+        # 按创建时间排序，最新的在前
+        active_tasks_list.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return custom_jsonify({'active_tasks': active_tasks_list})
+    except Exception as e:
+        app.logger.error(f"获取活动任务时出错: {traceback.format_exc()}")
+        return jsonify({'error': str(e)}), 500
+
+
 # 在应用启动时启动清理线程（保持原有代码不变）
 cleaner_thread = threading.Thread(target=run_task_cleaner)
 cleaner_thread.daemon = True
 cleaner_thread.start()
 
 if __name__ == '__main__':
-    # 将 host 设置为 '0.0.0.0' 使其支持所有网络接口访问
-    app.run(host='0.0.0.0', port=8888, debug=False)
+    # 强制禁用Flask的调试模式，以确保日志配置生效
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", "8888")), debug=False)

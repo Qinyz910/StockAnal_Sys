@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import openai
+from openai import OpenAI
 import logging
 from logging.handlers import RotatingFileHandler
 """
@@ -27,6 +28,10 @@ class ScenarioPredictor:
         self.openai_api_key = os.getenv('OPENAI_API_KEY', os.getenv('OPENAI_API_KEY'))
         self.openai_api_url = os.getenv('OPENAI_API_URL', 'https://api.openai.com/v1')
         self.openai_model = os.getenv('OPENAI_API_MODEL', 'gemini-2.0-pro-exp-02-05')
+        self.client = OpenAI(
+            api_key=self.openai_api_key,
+            base_url=self.openai_api_url
+        )
         # logging.info(f"scenario_predictor初始化完成：「{self.openai_api_key} {self.openai_api_url} {self.openai_model}」")
 
     def generate_scenarios(self, stock_code, market_type='A', days=60):
@@ -138,9 +143,7 @@ class ScenarioPredictor:
     def _generate_ai_analysis(self, stock_code, stock_info, df, scenarios):
         """使用AI生成各情景的分析说明，包含风险和机会因素"""
         try:
-            openai.api_key = self.openai_api_key
-            openai.api_base = self.openai_api_url
-    
+   
             # 提取关键数据
             current_price = df.iloc[-1]['close']
             ma5 = df.iloc[-1]['MA5']
@@ -177,7 +180,7 @@ class ScenarioPredictor:
     """
     
             # 调用AI API
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model=self.openai_model,
                 messages=[
                     {"role": "system", "content": "你是专业的股票分析师，擅长技术分析和情景预测。"},
@@ -249,68 +252,3 @@ class ScenarioPredictor:
             "risk_factors": self._get_default_risk_factors(),
             "opportunity_factors": self._get_default_opportunity_factors()
         }
-    
-    
-    
-    
-    
-    
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
