@@ -9,7 +9,8 @@
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Font Awesome -->
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/theme.css') }}">
     <!-- ApexCharts -->
     <link href="https://cdn.jsdelivr.net/npm/apexcharts@3.35.0/dist/apexcharts.min.css" rel="stylesheet">
     <!-- Download PDF -->
@@ -19,7 +20,8 @@
     <style>
         body {
             font-family: 'Helvetica Neue', Arial, sans-serif;
-            background-color: #f8f9fa;
+            background-color: var(--bg-color);
+            color: var(--text-color);
         }
         .navbar-brand {
             font-weight: bold;
@@ -28,21 +30,21 @@
             margin-left: 10px;
         }
         .sidebar {
-            background-color: #343a40;
+            background-color: var(--sidebar-bg-color);
             color: white;
             min-height: calc(100vh - 56px);
         }
         .sidebar .nav-link {
-            color: #ced4da;
+            color: var(--sidebar-text-color);
             padding: 0.75rem 1rem;
         }
         .sidebar .nav-link:hover {
             color: #fff;
-            background-color: rgba(255, 255, 255, 0.1);
+            background-color: var(--sidebar-hover-bg-color);
         }
         .sidebar .nav-link.active {
             color: #fff;
-            background-color: rgba(255, 255, 255, 0.2);
+            background-color: var(--sidebar-active-bg-color);
         }
         .sidebar .nav-link i {
             margin-right: 10px;
@@ -696,6 +698,39 @@
         font-weight: normal;
     }
     
+        /* Global Task Monitor Styles */
+        #task-monitor {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 350px;
+            max-height: 400px;
+            z-index: 1050;
+            display: none; /* Initially hidden */
+        }
+        #task-monitor .card-header {
+            cursor: pointer;
+        }
+        #task-monitor .task-item {
+            padding: 8px 12px;
+            border-bottom: 1px solid #eee;
+        }
+        #task-monitor .task-item:last-child {
+            border-bottom: none;
+        }
+        #task-monitor .task-item a {
+            text-decoration: none;
+            color: inherit;
+        }
+        #task-monitor .task-item small {
+            display: block;
+            color: #6c757d;
+        }
+        #task-monitor .progress {
+            height: 8px;
+            margin-top: 5px;
+        }
+
     /* 调整时间点样式，为日期留出空间 */
     .time-point {
         position: relative;
@@ -704,6 +739,15 @@
     }
 
     </style>
+            <script>
+            // Immediately apply the theme on page load to prevent FOUC
+            (function() {
+                const theme = localStorage.getItem('theme') || 'light';
+                if (theme === 'dark') {
+                    document.documentElement.setAttribute('data-theme', 'dark');
+                }
+            })();
+        </script>
     {% block head %}{% endblock %}
 </head>
 <body>
@@ -756,8 +800,17 @@
                     <li class="nav-item">
                         <a class="nav-link {% if request.path == '/qa' %}active{% endif %}" href="/qa"><i class="fas fa-question-circle"></i> 智能问答</a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/agent_analysis' %}active{% endif %}" href="/agent_analysis"><i class="fas fa-robot"></i> 智能体分析</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/etf_analysis' %}active{% endif %}" href="/etf_analysis"><i class="fas fa-chart-pie"></i> ETF分析</a>
+                    </li>
                 </ul>
-                <div class="d-flex">
+                <div class="d-flex align-items-center">
+                    <button class="btn text-white me-2" id="theme-toggle" title="切换主题">
+                        <i class="fas fa-moon"></i>
+                    </button>
                     <div class="input-group">
                         <input type="text" id="search-stock" class="form-control" placeholder="搜索股票代码/名称" aria-label="搜索股票">
                         <button class="btn btn-light" type="button" id="search-button">
@@ -774,8 +827,22 @@
             {% block sidebar %}{% endblock %}
 
             <main class="{% if self.sidebar()|trim %}col-md-9 ms-sm-auto col-lg-10 px-md-4{% else %}col-12{% endif %} main-content">
+                <div id="alerts-container"></div>
                 {% block content %}{% endblock %}
             </main>
+        </div>
+    </div>
+
+    <!-- Global Task Monitor -->
+    <div id="task-monitor" class="card shadow-lg">
+        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center py-2" data-bs-toggle="collapse" href="#task-monitor-body">
+            <h6 class="mb-0"><i class="fas fa-tasks me-2"></i>后台分析任务</h6>
+            <span class="badge bg-light text-primary" id="task-count">0</span>
+        </div>
+        <div class="collapse show" id="task-monitor-body">
+            <div class="card-body p-0" id="task-list" style="max-height: 300px; overflow-y: auto;">
+                <!-- Active tasks will be injected here -->
+            </div>
         </div>
     </div>
 
@@ -785,6 +852,8 @@
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <!-- ApexCharts -->
     <script src="https://cdn.jsdelivr.net/npm/apexcharts@3.35.0/dist/apexcharts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Common JS -->
     <script>
         // 显示加载中覆盖层
@@ -845,8 +914,40 @@
             }
         });
 
+        // Theme Toggle Logic
+        (function() {
+            const themeToggle = document.getElementById('theme-toggle');
+            if (!themeToggle) return;
+
+            const themeIcon = themeToggle.querySelector('i');
+            const htmlElement = document.documentElement;
+
+            // Set initial icon based on theme
+            if (htmlElement.getAttribute('data-theme') === 'dark') {
+                themeIcon.classList.remove('fa-moon');
+                themeIcon.classList.add('fa-sun');
+            }
+
+            themeToggle.addEventListener('click', function() {
+                const isDark = htmlElement.hasAttribute('data-theme');
+                if (isDark) {
+                    htmlElement.removeAttribute('data-theme');
+                    localStorage.setItem('theme', 'light');
+                    themeIcon.classList.remove('fa-sun');
+                    themeIcon.classList.add('fa-moon');
+                } else {
+                    htmlElement.setAttribute('data-theme', 'dark');
+                    localStorage.setItem('theme', 'dark');
+                    themeIcon.classList.remove('fa-moon');
+                    themeIcon.classList.add('fa-sun');
+                }
+            });
+        })();
+
+
         // 格式化数字 - 增强版
         function formatNumber(num, digits = 2) {
+            console.log('formatNumber called with:', num);
             if (num === null || num === undefined) return '-';
             return parseFloat(num).toFixed(digits);
         }
@@ -867,6 +968,7 @@
 
         // 格式化百分比
         function formatPercent(num, digits = 2) {
+            console.log('formatPercent called with:', num);
             if (num === null || num === undefined) return '-';
             return parseFloat(num).toFixed(digits) + '%';
         }
@@ -888,6 +990,101 @@
         function getTrendIcon(trend) {
             return trend === 'UP' ? '<i class="fas fa-arrow-up"></i>' : '<i class="fas fa-arrow-down"></i>';
         }
+        // Global Task Monitor Logic
+        $(document).ready(function() {
+            const monitor = $('#task-monitor');
+            const taskList = $('#task-list');
+            const taskCount = $('#task-count');
+
+            function checkActiveTasks() {
+                $.ajax({
+                    url: '/api/active_tasks',
+                    type: 'GET',
+                    success: function(response) {
+                        const tasks = response.active_tasks;
+                        
+                        if (tasks && tasks.length > 0) {
+                            taskList.empty();
+                            taskCount.text(tasks.length);
+
+                            tasks.forEach(task => {
+                                const taskHtml = `
+                                    <div class="task-item d-flex justify-content-between align-items-center">
+                                        <a href="/agent_analysis?task_id=${task.task_id}" class="text-decoration-none text-reset flex-grow-1">
+                                            <strong>股票: ${task.stock_code}</strong>
+                                            <small class="d-block">${task.current_step}</small>
+                                            <div class="progress">
+                                                <div class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: ${task.progress}%;" aria-valuenow="${task.progress}" aria-valuemin="0" aria-valuemax="100"></div>
+                                            </div>
+                                        </a>
+                                        <button class="btn btn-sm btn-outline-danger delete-task-btn ms-2 flex-shrink-0" data-task-id="${task.task_id}" title="删除任务" style="border: none;">
+                                            <i class="fas fa-times"></i>
+                                        </button>
+                                    </div>
+                                `;
+                                taskList.append(taskHtml);
+                            });
+                            monitor.fadeIn();
+                        } else {
+                            monitor.fadeOut();
+                        }
+                    },
+                    error: function(xhr) {
+                        // Hide monitor on error to avoid confusion
+                        monitor.fadeOut();
+                        console.error("Failed to fetch active tasks:", xhr.responseText);
+                    }
+                });
+            }
+
+            // Check for active tasks every 15 seconds
+            setInterval(checkActiveTasks, 15000);
+            // Initial check on page load
+            checkActiveTasks();
+
+            // Handle task deletion
+            $(document).on('click', '#task-list .delete-task-btn', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const button = $(this);
+                const taskId = button.data('task-id');
+                const monitor = $('#task-monitor');
+                const taskCount = $('#task-count');
+
+                if (!taskId) {
+                    console.error("Delete button clicked, but no task-id found.");
+                    return;
+                }
+                
+                if (confirm(`确定要删除任务 ${taskId} 吗？`)) {
+                    $.ajax({
+                        url: '/api/delete_agent_analysis',
+                        type: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify({ task_ids: [taskId] }),
+                        success: function(response) {
+                            if (response.success) {
+                                button.closest('.task-item').fadeOut(300, function() { 
+                                    $(this).remove(); 
+                                    const currentCount = $('#task-list .task-item').length;
+                                    taskCount.text(currentCount);
+                                    if (currentCount === 0) {
+                                        monitor.fadeOut();
+                                    }
+                                });
+                                showSuccess(`任务 ${taskId} 已成功删除。`);
+                            } else {
+                                showError(response.error || '删除任务失败。');
+                            }
+                        },
+                        error: function(xhr) {
+                            showError('删除任务时连接服务器失败。');
+                            console.error("Failed to delete task:", xhr.responseText);
+                        }
+                    });
+                }
+            });
+        });
     </script>
     {% block scripts %}{% endblock %}
 </body>

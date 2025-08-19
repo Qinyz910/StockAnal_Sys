@@ -169,7 +169,64 @@
 {% block scripts %}
 <script>
     let stockData = [];
-    let analysisResult = null;
+        let analysisResult = null;
+
+    // === THEME-AWARE CHART LOGIC START ===
+    let charts = {}; // Store chart instances
+
+    function getApexChartThemeOptions() {
+        const isDarkMode = $('html').attr('data-theme') === 'dark';
+        const options = {
+            theme: {
+                mode: isDarkMode ? 'dark' : 'light'
+            },
+            chart: {
+                background: 'transparent'
+            },
+            tooltip: {
+                theme: isDarkMode ? 'dark' : 'light'
+            }
+        };
+        
+        if(isDarkMode) {
+            options.plotOptions = {
+                radar: {
+                    polygons: {
+                        strokeColors: '#555',
+                        fill: { colors: ['#393939', '#444444'] }
+                    }
+                }
+            };
+        } else {
+             options.plotOptions = {
+                radar: {
+                     polygons: {
+                        strokeColors: '#e9e9e9',
+                        fill: { colors: ['#f8f8f8', '#fff'] }
+                    }
+                }
+            };
+        }
+        return options;
+    }
+
+    function destroyAllCharts() {
+        Object.values(charts).forEach(chart => {
+            if (chart && typeof chart.destroy === 'function') {
+                chart.destroy();
+            }
+        });
+        charts = {};
+    }
+
+    function rerenderAllCharts() {
+        if (!analysisResult) return;
+        destroyAllCharts();
+        renderRadarChart();
+        renderPriceChart();
+    }
+    // === THEME-AWARE CHART LOGIC END ===
+
 
     // 提交表单进行分析
     $('#analysis-form').submit(function(e) {
@@ -186,6 +243,20 @@
         // 重定向到股票详情页
         window.location.href = `/stock_detail/${stockCode}?market_type=${marketType}&period=${period}`;
     });
+
+    // Observe theme changes for charts
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            if (mutation.attributeName === "data-theme") {
+                rerenderAllCharts();
+            }
+        });
+    });
+
+    observer.observe(document.documentElement, {
+        attributes: true
+    });
+
 
     // Format AI analysis text
     function formatAIAnalysis(text) {
@@ -469,7 +540,9 @@
         // 清除旧图表
         $('#radar-chart').empty();
 
-        const chart = new ApexCharts(document.querySelector("#radar-chart"), options);
+        const finalOptions = $.extend(true, {}, options, getApexChartThemeOptions());
+        const chart = new ApexCharts(document.querySelector("#radar-chart"), finalOptions);
+        charts.radar = chart;
         chart.render();
     }
 
@@ -597,7 +670,9 @@
         // 清除旧图表
         $('#price-chart').empty();
 
-        const chart = new ApexCharts(document.querySelector("#price-chart"), options);
+        const finalOptions = $.extend(true, {}, options, getApexChartThemeOptions());
+        const chart = new ApexCharts(document.querySelector("#price-chart"), finalOptions);
+        charts.price = chart;
         chart.render();
     }
 </script>

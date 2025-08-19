@@ -72,7 +72,7 @@
                     <h5 class="mb-0">与AI助手对话</h5>
                 </div>
                 <div class="card-body p-0">
-                    <div id="chat-messages" class="p-3" style="height: 400px; overflow-y: auto;">
+                    <div id="chat-messages" class="p-3" style="height: 600px; overflow-y: auto;">
                         <div class="chat-message system-message">
                             <div class="message-content">
                                 <p>您好！我是股票分析AI助手，请输入您想了解的关于当前股票的问题。</p>
@@ -134,6 +134,65 @@
         background-color: #f1f1f1;
         color: #333;
         border-bottom-left-radius: 0;
+    }
+
+    .typing-indicator {
+        display: inline-block;
+        vertical-align: middle;
+        padding: 10px;
+    }
+    .typing-indicator span {
+        height: 8px;
+        width: 8px;
+        float: left;
+        margin: 0 2px;
+        background-color: #6c757d;
+        display: block;
+        border-radius: 50%;
+        opacity: 0.4;
+        animation: typing-fade 1s infinite;
+    }
+    .typing-indicator span:nth-of-type(1) {
+        animation-delay: 0s;
+    }
+    .typing-indicator span:nth-of-type(2) {
+        animation-delay: 0.2s;
+    }
+    .typing-indicator span:nth-of-type(3) {
+        animation-delay: 0.4s;
+    }
+    @keyframes typing-fade {
+        0%, 100% { opacity: 0.3; }
+        50% { opacity: 1; }
+    }
+    
+    .loading-text {
+        font-size: 0.875rem;
+        color: #6c757d;
+        text-align: center;
+        padding-bottom: 5px;
+    }
+
+    /* Mermaid and code block styling */
+    .mermaid {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        text-align: center;
+    }
+
+    pre, code {
+        background-color: #e9ecef;
+        border-radius: 4px;
+        padding: 2px 4px;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 0.9em;
+    }
+
+    pre {
+        padding: 1em;
+        overflow-x: auto;
     }
 
     .message-content p {
@@ -317,9 +376,30 @@
     }
 
     function askQuestion(question) {
-        // 显示思考中消息
         const thinkingMessageId = 'thinking-' + Date.now();
-        addSystemMessage('<i class="fas fa-spinner fa-pulse"></i> 正在思考...', thinkingMessageId);
+        const loadingHtml = `
+            <div class="loading-container text-center">
+                 <p class="loading-text mb-1">正在连接AI...</p>
+                <div class="typing-indicator">
+                    <span></span>
+                    <span></span>
+                    <span></span>
+                </div>
+            </div>
+        `;
+        addSystemMessage(loadingHtml, thinkingMessageId);
+
+        const hints = [
+            "正在分析您的问题...",
+            "检索相关数据..."
+        ];
+        let hintIndex = 0;
+        const $loadingText = $(`#${thinkingMessageId}`).find('.loading-text');
+
+        const hintInterval = setInterval(() => {
+            hintIndex = (hintIndex + 1) % hints.length;
+            $loadingText.text(hints[hintIndex]);
+        }, 1800);
 
         // 发送问题到API
         $.ajax({
@@ -332,30 +412,28 @@
                 market_type: selectedStock.market_type
             }),
             success: function(response) {
-                // 移除思考中消息
-                $(`#${thinkingMessageId}`).remove();
+                clearInterval(hintInterval);
+                const $thinkingMessage = $(`#${thinkingMessageId}`);
+                
+                const formattedAnswer = formatAnswer(response.answer);
+                $thinkingMessage.find('.message-content').html(formattedAnswer);
+                $thinkingMessage.find('.loading-container').remove(); // Remove loading animation
+                
+                // Render Mermaid charts if any
+                mermaid.run({
+                    nodes: $thinkingMessage.find('.mermaid')
+                });
 
-                // 添加回答
-                addSystemMessage(formatAnswer(response.answer));
-
-                // 滚动到底部
                 scrollToBottom();
             },
             error: function(xhr, status, error) {
-                // 移除思考中消息
-                $(`#${thinkingMessageId}`).remove();
-
-                // 添加错误消息
+                clearInterval(hintInterval);
+                 $(`#${thinkingMessageId}`).remove();
                 let errorMsg = '无法回答您的问题';
                 if (xhr.responseJSON && xhr.responseJSON.error) {
                     errorMsg += ': ' + xhr.responseJSON.error;
-                } else if (error) {
-                    errorMsg += ': ' + error;
                 }
-
                 addSystemMessage(`<span class="text-danger">${errorMsg}</span>`);
-
-                // 滚动到底部
                 scrollToBottom();
             }
         });
@@ -402,52 +480,46 @@
     function formatAnswer(text) {
         if (!text) return '';
 
-        // First, make the text safe for HTML
-        const safeText = text
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
+        // First, make the text safe for HTML, but keep mermaid blocks intact
+        const parts = text.split(/(```mermaid[\s\S]*?```)/);
+        let html = '';
 
-        // Replace basic Markdown elements
-        let formatted = safeText
-            // Bold text with ** or __
-            .replace(/\*\*(.*?)\*\*/g, '<strong class="keyword">$1</strong>')
-            .replace(/__(.*?)__/g, '<strong>$1</strong>')
+        parts.forEach(part => {
+            if (part.startsWith('```mermaid')) {
+                const code = part.replace(/```mermaid\n|```/g, '').trim();
+                html += `<div class="mermaid">${code}</div>`;
+            } else {
+                 let formattedPart = part
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/\*\*(.*?)\*\*/g, '<strong class="keyword">$1</strong>')
+                    .replace(/__(.*?)__/g, '<strong>$1</strong>')
+                    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                    .replace(/_(.*?)_/g, '<em>$1</em>')
+                    .replace(/^#### (.*?)$/gm, '<h6>$1</h6>')
+                    .replace(/^### (.*?)$/gm, '<h6>$1</h6>')
+                    .replace(/^## (.*?)$/gm, '<h6>$1</h6>')
+                    .replace(/^# (.*?)$/gm, '<h6>$1</h6>')
+                    .replace(/`([^`]+)`/g, '<code>$1</code>')
+                    .replace(/支撑位/g, '<span class="keyword">支撑位</span>')
+                    .replace(/压力位/g, '<span class="keyword">压力位</span>')
+                    .replace(/趋势/g, '<span class="keyword">趋势</span>')
+                    .replace(/均线/g, '<span class="keyword">均线</span>')
+                    .replace(/MACD/g, '<span class="term">MACD</span>')
+                    .replace(/RSI/g, '<span class="term">RSI</span>')
+                    .replace(/KDJ/g, '<span class="term">KDJ</span>')
+                    .replace(/([上涨升])/g, '<span class="trend-up">$1</span>')
+                    .replace(/([下跌降])/g, '<span class="trend-down">$1</span>')
+                    .replace(/(买入|做多|多头|突破)/g, '<span class="trend-up">$1</span>')
+                    .replace(/(卖出|做空|空头|跌破)/g, '<span class="trend-down">$1</span>')
+                    .replace(/(\d+\.\d{2})/g, '<span class="price">$1</span>')
+                    .replace(/\n/g, '<br>');
+                html += formattedPart;
+            }
+        });
 
-            // Italic text with * or _
-            .replace(/\*(.*?)\*/g, '<em>$1</em>')
-            .replace(/_(.*?)_/g, '<em>$1</em>')
-
-            // Headers - only h4, h5, h6 for chat
-            .replace(/^#### (.*?)$/gm, '<h6>$1</h6>')
-            .replace(/^### (.*?)$/gm, '<h6>$1</h6>')
-            .replace(/^## (.*?)$/gm, '<h6>$1</h6>')
-            .replace(/^# (.*?)$/gm, '<h6>$1</h6>')
-
-            // Apply special styling to financial terms
-            .replace(/支撑位/g, '<span class="keyword">支撑位</span>')
-            .replace(/压力位/g, '<span class="keyword">压力位</span>')
-            .replace(/趋势/g, '<span class="keyword">趋势</span>')
-            .replace(/均线/g, '<span class="keyword">均线</span>')
-            .replace(/MACD/g, '<span class="term">MACD</span>')
-            .replace(/RSI/g, '<span class="term">RSI</span>')
-            .replace(/KDJ/g, '<span class="term">KDJ</span>')
-
-            // Highlight price patterns and movements
-            .replace(/([上涨升])/g, '<span class="trend-up">$1</span>')
-            .replace(/([下跌降])/g, '<span class="trend-down">$1</span>')
-            .replace(/(买入|做多|多头|突破)/g, '<span class="trend-up">$1</span>')
-            .replace(/(卖出|做空|空头|跌破)/g, '<span class="trend-down">$1</span>')
-
-            // Highlight price values (matches patterns like 31.25, 120.50)
-            .replace(/(\d+\.\d{2})/g, '<span class="price">$1</span>')
-
-            // Convert line breaks to paragraph tags
-            .replace(/\n\n+/g, '</p><p class="mb-2">')
-            .replace(/\n/g, '<br>');
-
-        // Wrap in paragraph tags for consistent styling
-        return '<p class="mb-2">' + formatted + '</p>';
+        return html;
     }
 </script>
 {% endblock %}

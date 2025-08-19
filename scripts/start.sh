@@ -1,3 +1,4 @@
+
 #!/bin/bash
 
 # 智能分析系统管理脚本
@@ -5,11 +6,11 @@
 
 # 配置
 APP_NAME="智能分析系统"
-APP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PYTHON_CMD="python"
-SERVER_SCRIPT="web_server.py"
-PID_FILE="${APP_DIR}/.server.pid"
-LOG_FILE="${APP_DIR}/server.log"
+APP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
+PYTHON_CMD="${APP_DIR}/env/bin/python"
+SERVER_SCRIPT="run.py"
+PID_FILE="${APP_DIR}/data/.server.pid"
+LOG_FILE="${APP_DIR}/data/server.log"
 MONITOR_INTERVAL=30  # 监控检查间隔（秒）
 
 # 颜色配置
@@ -47,6 +48,13 @@ check_prerequisites() {
         echo -e "${RED}错误: 未找到服务器脚本 ${SERVER_SCRIPT}。${NC}"
         echo -e "${YELLOW}当前目录: $(pwd)${NC}"
         exit 1
+    fi
+
+    # 确保日志和PID目录存在
+    local data_dir=$(dirname "$PID_FILE")
+    if [ ! -d "$data_dir" ]; then
+        echo -e "${YELLOW}数据目录不存在，正在创建: ${data_dir}${NC}"
+        mkdir -p "$data_dir"
     fi
 }
 

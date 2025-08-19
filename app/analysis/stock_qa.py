@@ -12,17 +12,21 @@ import os
 import json
 import traceback
 import openai
+from openai import OpenAI
 from urllib.parse import urlparse
 from datetime import datetime
 
 
 class StockQA:
-    def __init__(self, analyzer, openai_api_key=None, openai_model=None):
+    def __init__(self, analyzer, openai_api_key=None):
         self.analyzer = analyzer
         self.openai_api_key = os.getenv('OPENAI_API_KEY', openai_api_key)
         self.openai_api_url = os.getenv('OPENAI_API_URL', 'https://api.openai.com/v1')
-        self.openai_model = os.getenv('OPENAI_API_MODEL', openai_model or 'gpt-4o')
-        self.function_call_model = os.getenv('FUNCTION_CALL_MODEL', openai_model or 'gpt-4o')
+        self.openai_model = os.getenv('OPENAI_API_MODEL', 'gpt-4o')
+        self.client = OpenAI(
+            api_key=self.openai_api_key,
+            base_url=self.openai_api_url
+        )
         self.serp_api_key = os.getenv('SERP_API_KEY')
         self.tavily_api_key = os.getenv('TAVILY_API_KEY')
         self.max_qa_rounds = int(os.getenv('MAX_QA', '10'))  # 默认保留10轮对话
@@ -127,13 +131,11 @@ class StockQA:
             # 添加当前问题
             messages.append({"role": "user", "content": question})
             
+            
             # 调用AI API
-            openai.api_key = self.openai_api_key
-            openai.api_base = self.openai_api_url
-
-            # 第一步：调用模型，让它决定是否使用工具
-            first_response = openai.ChatCompletion.create(
-                model=self.function_call_model,
+            #第一步：调用模型，让它决定是否使用工具
+            first_response = self.client.chat.completions.create(
+                model=self.openai_model,
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
@@ -178,7 +180,7 @@ class StockQA:
                         })
                 
                 # 第二步：让模型根据工具调用结果生成最终响应
-                second_response = openai.ChatCompletion.create(
+                second_response = self.client.chat.completions.create(
                     model=self.openai_model,
                     messages=tool_messages,
                     temperature=0.7
@@ -272,7 +274,7 @@ class StockQA:
             # 尝试获取基本面数据
             try:
                 # 导入基本面分析器
-                from fundamental_analyzer import FundamentalAnalyzer
+                from app.analysis.fundamental_analyzer import FundamentalAnalyzer
                 fundamental = FundamentalAnalyzer()
 
                 # 获取基本面数据
