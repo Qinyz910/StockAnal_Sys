@@ -17,16 +17,32 @@ from logging.handlers import RotatingFileHandler
 import traceback
 import os
 import json
+import atexit
 from datetime import date, datetime, timedelta
 from flask_cors import CORS
 from pathlib import Path
 import time
 from flask_caching import Cache
-import threading
 import sys
 from flask_swagger_ui import get_swaggerui_blueprint
-from app.core.database import get_session, StockInfo, AnalysisResult, Portfolio, USE_DATABASE
+from app.core.database import (
+    get_session,
+    StockInfo,
+    AnalysisResult,
+    Portfolio,
+    USE_DATABASE,
+    db_session_scope,
+    query_with_pagination,
+    init_db,
+    remove_session,
+)
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
+from flask import Response, stream_with_context
+from flask_compress import Compress
+from app.core.cache_manager import cache_manager
+from app.core.performance_monitor import performance_monitor, monitor_performance
+
 from app.analysis.industry_analyzer import IndustryAnalyzer
 from app.analysis.fundamental_analyzer import FundamentalAnalyzer
 from app.analysis.capital_flow_analyzer import CapitalFlowAnalyzer
@@ -64,9 +80,22 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 )
 
 app = Flask(__name__)
+
+# 启用gzip压缩
+Compress(app)
+app.config['COMPRESS_MIMETYPES'] = [
+    'text/html', 'text/css', 'text/xml', 'text/plain',
+    'application/json', 'application/javascript', 'application/xml'
+]
+app.config['COMPRESS_LEVEL'] = 6
+app.config['COMPRESS_MIN_SIZE'] = 500
+
 CORS(app, resources={r"/*": {"origins": "*"}})
 analyzer = StockAnalyzer()
 us_stock_service = USStockService()
+
+# 初始化线程池用于异步任务
+executor = ThreadPoolExecutor(max_workers=int(os.getenv('THREAD_POOL_SIZE', '10')))
 
 # 配置缓存
 cache_config = {
@@ -82,10 +111,31 @@ if os.getenv('USE_REDIS_CACHE', 'False').lower() == 'true' and os.getenv('REDIS_
         'CACHE_DEFAULT_TIMEOUT': 300
     }
 
-cache = Cache(config={'CACHE_TYPE': 'SimpleCache'})
+cache = Cache(config=cache_config)
 cache.init_app(app)
 
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
+
+# 缓存预热热门股票数据（可根据实际情况调整列表）
+HOT_STOCKS = os.getenv('CACHE_PREWARM_STOCKS', '000001,600519,300750').split(',')
+CACHE_PREWARM_MARKET = os.getenv('CACHE_PREWARM_MARKET', 'A')
+
+
+def prewarm_cache():
+    app.logger.info("开始预热热门股票缓存")
+    for stock in HOT_STOCKS:
+        stock_code = stock.strip()
+        if not stock_code:
+            continue
+        try:
+            analyzer.get_stock_data(stock_code, market_type=CACHE_PREWARM_MARKET)
+        except Exception as exc:
+            app.logger.warning(f"预热缓存失败: {stock_code}, 错误: {exc}")
+    app.logger.info("缓存预热完成")
+
+
+if os.getenv('ENABLE_CACHE_PREWARM', 'true').lower() == 'true':
+    executor.submit(prewarm_cache)
 
 
 # 确保全局变量在重新加载时不会丢失
@@ -2191,10 +2241,131 @@ def get_active_tasks():
         return jsonify({'error': str(e)}), 500
 
 
+# 添加性能监控API端点
+@app.route('/api/performance/metrics', methods=['GET'])
+def get_performance_metrics():
+    """获取性能监控指标"""
+    try:
+        metrics = performance_monitor.get_metrics()
+        cache_stats = cache_manager.get_stats()
+        return jsonify({
+            'success': True,
+            'metrics': metrics,
+            'cache_stats': cache_stats
+        })
+    except Exception as e:
+        app.logger.error(f"获取性能指标失败: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/performance/slow_queries', methods=['GET'])
+def get_slow_queries():
+    """获取慢查询列表"""
+    try:
+        limit = request.args.get('limit', 20, type=int)
+        slow_queries = performance_monitor.get_slow_queries(limit)
+        return jsonify({
+            'success': True,
+            'slow_queries': slow_queries
+        })
+    except Exception as e:
+        app.logger.error(f"获取慢查询失败: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/performance/reset', methods=['POST'])
+def reset_performance_metrics():
+    """重置性能监控指标"""
+    try:
+        performance_monitor.reset_metrics()
+        return jsonify({
+            'success': True,
+            'message': '性能监控指标已重置'
+        })
+    except Exception as e:
+        app.logger.error(f"重置性能指标失败: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/cache/clear', methods=['POST'])
+def clear_cache_api():
+    """清空缓存API"""
+    try:
+        pattern = request.json.get('pattern') if request.json else None
+        cache_manager.clear(pattern)
+        cache.clear()
+        return jsonify({
+            'success': True,
+            'message': f'缓存已清空{", pattern: " + pattern if pattern else ""}'
+        })
+    except Exception as e:
+        app.logger.error(f"清空缓存失败: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# 请求前后钩子进行性能监控
+@app.before_request
+def before_request():
+    request._start_time = time.time()
+
+
+@app.after_request
+def after_request(response):
+    duration = None
+    if hasattr(request, '_start_time'):
+        duration = time.time() - request._start_time
+        metric_name = f"http.{request.endpoint}" if request.endpoint else f"http.{request.path}"
+        performance_monitor.record_metric(metric_name, duration, success=response.status_code < 400)
+        if duration > 2.0:
+            app.logger.warning(
+                f"慢请求: {request.method} {request.path} "
+                f"耗时: {duration:.3f}s"
+            )
+    
+    # 添加性能相关的响应头
+    response.headers['X-Response-Time'] = f"{duration:.3f}s" if duration is not None else 'N/A'
+    
+    return response
+
+
+@app.teardown_appcontext
+def shutdown_session(exception=None):
+    """请求结束后清理数据库会话"""
+    if USE_DATABASE:
+        remove_session()
+
+
+# 定期清理过期缓存
+def cleanup_cache_periodically():
+    while True:
+        time.sleep(3600)  # 每小时清理一次
+        try:
+            count = cache_manager.cleanup_expired()
+            app.logger.info(f"定期清理了 {count} 个过期缓存")
+        except Exception as e:
+            app.logger.error(f"清理缓存失败: {e}")
+
+
+# 启动缓存清理线程
+cache_cleanup_thread = threading.Thread(target=cleanup_cache_periodically, daemon=True)
+cache_cleanup_thread.start()
+
 # 在应用启动时启动清理线程（保持原有代码不变）
 cleaner_thread = threading.Thread(target=run_task_cleaner)
 cleaner_thread.daemon = True
 cleaner_thread.start()
+
+
+# 应用关闭时的清理工作
+def cleanup_on_shutdown():
+    app.logger.info("应用关闭，执行清理工作...")
+    executor.shutdown(wait=False)
+    if USE_DATABASE:
+        remove_session()
+    app.logger.info("清理完成")
+
+
+atexit.register(cleanup_on_shutdown)
 
 if __name__ == '__main__':
     # 强制禁用Flask的调试模式，以确保日志配置生效
