@@ -22,6 +22,9 @@ import threading
 from urllib.parse import urlparse
 from openai import OpenAI
 
+from app.core.cache_manager import cache_manager
+from app.core.performance_monitor import monitor_performance
+
 # 线程局部存储
 thread_local = threading.local()
 
@@ -60,25 +63,50 @@ class StockAnalyzer:
             'atr_period': 14
         }
 
-        # 添加缓存初始化
+        # 添加缓存初始化（保持向后兼容，但将使用新的缓存管理器）
         self.data_cache = {}
+        self.data_cache_ttl = int(os.getenv('STOCK_DATA_CACHE_TTL', '900'))
+        self.cache_manager = cache_manager
 
         # JSON匹配标志
         self.json_match_flag = True
+    @monitor_performance('stock_analyzer.get_stock_data')
     def get_stock_data(self, stock_code, market_type='A', start_date=None, end_date=None):
         """获取股票数据 - 增强版，具备更强的容错能力"""
         import akshare as ak
 
         self.logger.info(f"开始获取股票 {stock_code} 数据，市场类型: {market_type}")
 
-        cache_key = f"{stock_code}_{market_type}_{start_date}_{end_date}_price"
-        if cache_key in self.data_cache:
-            return self.data_cache[cache_key].copy()
-
         if start_date is None:
             start_date = (datetime.now() - timedelta(days=365)).strftime('%Y%m%d')
         if end_date is None:
             end_date = datetime.now().strftime('%Y%m%d')
+        
+        cache_key = f"stock_data:{stock_code}:{market_type}:{start_date}:{end_date}"
+        
+        # 先检查新缓存管理器
+        cached = self.cache_manager.get(cache_key, 'stock_data')
+        if cached is not None:
+            try:
+                df_cached = pd.DataFrame(cached)
+                if 'date' in df_cached.columns:
+                    df_cached['date'] = pd.to_datetime(df_cached['date'], errors='coerce')
+                for col in ['open', 'close', 'high', 'low', 'volume']:
+                    if col in df_cached.columns:
+                        df_cached[col] = pd.to_numeric(df_cached[col], errors='coerce')
+                df_cached.dropna(subset=['date'], inplace=True)
+                return df_cached.reset_index(drop=True)
+            except Exception as cache_error:
+                self.logger.debug(f"缓存反序列化失败，回退到实时获取: {cache_error}")
+        
+        # 兼容旧缓存（逐步迁移）
+        old_cache_key = f"{stock_code}_{market_type}_{start_date}_{end_date}_price"
+        cached_entry = self.data_cache.get(old_cache_key)
+        if cached_entry:
+            if cached_entry.get('expiry', 0) > time.time():
+                return cached_entry['value'].copy()
+            else:
+                self.data_cache.pop(old_cache_key, None)
 
         try:
             df = None
@@ -122,7 +150,20 @@ class StockAnalyzer:
 
             # 4. 排序并返回
             result = df.sort_values('date').reset_index(drop=True)
-            self.data_cache[cache_key] = result.copy()
+            
+            # 保存到新缓存管理器（转换为可序列化格式）
+            try:
+                cache_data = result.to_dict('records')
+                self.cache_manager.set(cache_key, cache_data, 'stock_data', self.data_cache_ttl)
+            except:
+                pass
+            
+            # 保留旧缓存以兼容性（带过期时间）
+            old_cache_key = f"{stock_code}_{market_type}_{start_date}_{end_date}_price"
+            self.data_cache[old_cache_key] = {
+                'value': result.copy(),
+                'expiry': time.time() + self.data_cache_ttl
+            }
             
             return result
 
